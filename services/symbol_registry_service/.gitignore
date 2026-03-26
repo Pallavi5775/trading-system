@@ -1,0 +1,125 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# Logs & runtime
+# =========================
+*.log
+logs/
+*.out
+*.err
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+*.env
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+*.pid
+
+# =========================
+# Database
+# =========================
+*.sqlite3
+*.db
+*.sql
+
+# PostgreSQL dumps
+*.dump
+
+# =========================
+# Test / coverage
+# =========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# =========================
+# Jupyter Notebooks
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Node (if React UI exists)
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# Build artifacts
+# =========================
+*.tar
+*.gz
+*.zip
+
+# =========================
+# Secrets / Keys
+# =========================
+*.pem
+*.key
+*.crt
+
+# =========================
+# AWS / Cloud
+# =========================
+.aws/
+terraform.tfstate*
+*.tfvars
+
+# =========================
+# Custom (Trading System)
+# =========================
+data/
+market_data/
+backtest_results/
+reports/
+temp/
+cache/
+
+# Model artifacts (if ML later)
+models/
+*.pkl
+*.h5
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
