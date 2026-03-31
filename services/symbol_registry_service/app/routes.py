@@ -5,8 +5,20 @@ from app.database import SessionLocal
 from app.models import SymbolRegistry, SymbolSourceMapping
 from app.schemas import SymbolCreate, SourceMappingCreate
 from app.services.coverage_scheduler import update_all_symbols
+from app.services.alpha_vantage_adapter import get_alpha_symbol
 router = APIRouter()
+import logging
 
+logger = logging.getLogger("coverage_service")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 # Dependency
 def get_db():
@@ -64,10 +76,11 @@ def get_symbol(symbol_id: str, db: Session = Depends(get_db)):
         },
         "mapping": {
             "yfinance": mapping.yfinance_symbol if mapping else None,
-            "alpha_vantage": mapping.alpha_vantage_symbol if mapping else None
+            "alpha_vantage": mapping.alpha_vantage_symbol if mapping else None,
+            "massive": mapping.massive_symbol if mapping else None,
+            "coverage_type": mapping.coverage_type if mapping else None
         }
     }
-
 
 # Get Available Sources
 @router.get("/symbols/{symbol_id}/sources")
@@ -80,16 +93,19 @@ def get_sources(symbol_id: str, db: Session = Depends(get_db)):
 
     sources = []
 
-    if mapping.yfinance_symbol:
-        sources.append("yfinance")
-
     if mapping.alpha_vantage_symbol:
         sources.append("alpha_vantage")
+
+    if mapping.massive_symbol:
+        sources.append("massive")
+
+    if mapping.yfinance_symbol:
+        sources.append("yfinance")
 
     return {"available_sources": sources}
 
 
-# Resolve Symbol
+
 @router.get("/resolve/{symbol_id}")
 def resolve_symbol(symbol_id: str, db: Session = Depends(get_db)):
 
@@ -98,13 +114,25 @@ def resolve_symbol(symbol_id: str, db: Session = Depends(get_db)):
     if not mapping:
         raise HTTPException(status_code=404, detail="Mapping not found")
 
+    symbol = db.query(SymbolRegistry).filter_by(symbol_id=symbol_id).first()
+
+    # 🔹 Auto Alpha symbol
+    alpha_symbol = mapping.alpha_vantage_symbol
+    if not alpha_symbol:
+        alpha_symbol = get_alpha_symbol(
+            symbol.base_symbol,
+            symbol.country
+        )
+
+    # 🔹 Massive symbol (usually same as base for US equities)
+    massive_symbol = mapping.massive_symbol or symbol.base_symbol
+
     return {
         "symbol_id": symbol_id,
-        "yfinance": mapping.yfinance_symbol,
-        "alpha_vantage": mapping.alpha_vantage_symbol
+        "alpha_vantage": alpha_symbol,
+        "massive": massive_symbol,
+        "yfinance": mapping.yfinance_symbol
     }
-
-
 
 
 
@@ -112,10 +140,14 @@ def resolve_symbol(symbol_id: str, db: Session = Depends(get_db)):
 @router.post("/coverage/run")
 def run_coverage():
 
+    logger.info("[API] Coverage run triggered")
+
     results = update_all_symbols()
+
+    logger.info("[API] Coverage run completed")
 
     return {
         "message": "Coverage updated",
         "count": len(results),
-        "data": results[:5]
+        "data": results
     }

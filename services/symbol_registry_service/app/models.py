@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, TIMESTAMP, func
+from sqlalchemy import Column, DateTime, Float, Integer, String, Boolean, TIMESTAMP, func
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -34,8 +34,27 @@ class SymbolSourceMapping(Base):
 
     yfinance_symbol = Column(String, nullable=True)
     alpha_vantage_symbol = Column(String, nullable=True)
+    massive_symbol= Column(String, nullable=True)
 
-    # 🔥 ADD THESE (for coverage system)
+    # ADD THESE (for coverage system)
     coverage_type = Column(String)
     primary_source = Column(String)
     fallback_source = Column(String)
+
+# app/models/alpha_symbol_search.py
+
+class AlphaSymbolSearch(Base):
+    __tablename__ = "alpha_symbol_search"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    query = Column(String)   # searched keyword (e.g., TESLA)
+    symbol = Column(String)
+    name = Column(String)
+    type = Column(String)
+    region = Column(String)
+    currency = Column(String)
+    timezone = Column(String)
+    match_score = Column(Float)
+
+    created_at = Column(DateTime)    

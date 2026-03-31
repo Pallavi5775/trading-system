@@ -1,7 +1,13 @@
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import logging
 
+logger = logging.getLogger("market_data_service")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 class YFinanceAdapter:
 
     def fetch_ohlc(self, symbol, start=None, end=None):
@@ -42,3 +48,9 @@ class YFinanceAdapter:
         df["ingestion_time"] = datetime.utcnow()
 
         return df
+    def check_symbol(self, symbol):
+        try:
+            df = yf.download(symbol, period="5d", progress=False)
+            return not df.empty
+        except:
+            return False

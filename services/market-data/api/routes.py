@@ -1,15 +1,16 @@
 from fastapi import APIRouter, HTTPException
 import pandas as pd
 import requests
-
+import json
 # Adapters
 from ingestion.adapters.yfinance_adapter import YFinanceAdapter
 from ingestion.adapters.alpha_vantage_adapter import AlphaVantageAdapter
-
+from storage.market_store_service import store_market_data_with_versioning
 # Pipeline
 from normalization.normalizer import normalize
 from features.feature_engine import compute_returns, compute_volatility
 from validation.validator import validate
+from ingestion.adapters.massive_adapter import MassiveAdapter
 from reconciliation.reconciler import reconcile_data
 router = APIRouter()
 
@@ -25,8 +26,9 @@ logging.basicConfig(
 )
 # 🔹 Adapter Map
 adapters = {
-    "yfinance": YFinanceAdapter(),
-    "alpha_vantage": AlphaVantageAdapter()
+    "alpha_vantage": AlphaVantageAdapter(),
+    "massive": MassiveAdapter(),
+    "yfinance": YFinanceAdapter()
 }
 
 
@@ -68,25 +70,16 @@ def get_coverage(symbol_id: str):
         yfinance = mapping.get("yfinance")
         alpha_vantage = mapping.get("alpha_vantage")
 
-        # Dynamic selection logic
-        primary = None
-        fallback = None
 
-        if yfinance and alpha_vantage:
-            primary = "yfinance"
-            fallback = "alpha_vantage"
-        elif yfinance:
-            primary = "yfinance"
-        elif alpha_vantage:
-            primary = "alpha_vantage"
+        massive = mapping.get("massive")
 
         coverage = {
-            "primary": primary,
-            "fallback": fallback,
-            "yfinance": yfinance,
-            "alpha_vantage": alpha_vantage
-        }
+            "alpha_vantage": alpha_vantage,
+            "massive": massive,
+            "yfinance": yfinance
+        }     
 
+     
         logger.info(f"Coverage for {symbol_id}: {coverage}")
         return coverage
 
@@ -126,100 +119,69 @@ def fetch_market_data(symbol_id: str):
 
     coverage = get_coverage(symbol_id)
 
-    primary = coverage["primary"]
-    fallback = coverage["fallback"]
+    # Priority order (your requirement)
+    priority_order = ["alpha_vantage", "massive", "yfinance"]
 
-    if not primary:
-        logger.warning(f"No primary source configured for: {symbol_id}")
-        raise HTTPException(status_code=400, detail="No primary source configured")
+    
 
-    # CASE 1: Reconciliation
-    if primary == "yfinance" and fallback == "alpha_vantage":
+    successful_data = []
 
-        logger.info(f"Attempting reconciliation for: {symbol_id}")
+    # Step 1: Try all providers (not just primary/fallback)
+    for source in priority_order:
+        symbol = coverage.get(source)
+
+        if not symbol:
+            logger.info(f"{source} not available for {symbol_id}")
+            continue
 
         try:
-            y_symbol = coverage["yfinance"]
-            a_symbol = coverage["alpha_vantage"]
+            logger.info(f"Trying source: {source} for {symbol_id}")
 
-            df_y = adapters["yfinance"].fetch_ohlc(y_symbol)
-            df_a = adapters["alpha_vantage"].fetch_ohlc(a_symbol)
+            df = adapters[source].fetch_ohlc(symbol)
 
-            # FIX: handle empty alpha_vantage
-            if df_a is None or df_a.empty:
-                logger.warning("Alpha Vantage returned empty → skipping reconciliation")
-                df_y["source_used"] = "yfinance"
-                return df_y
+            if df is None or df.empty:
+                raise Exception("Empty dataframe")
 
-            df = reconcile_data(df_y, df_a)
+            df["source_used"] = source
+            df = enrich_dataframe(df, symbol_id, source)
+
+            successful_data.append((source, df))
+
+            logger.info(f"{source} SUCCESS for {symbol_id}")
+
+        except Exception as e:
+            logger.warning(f"{source} FAILED for {symbol_id}: {str(e)}")
+
+    # Step 2: Decide based on results
+
+    if not successful_data:
+        logger.error(f"All providers failed for {symbol_id}")
+        return pd.DataFrame()  # prevent crash
+
+    # CASE 1: Reconciliation (if 2+ sources available)
+    if len(successful_data) >= 2:
+        try:
+            logger.info(f"Attempting reconciliation for {symbol_id}")
+
+            # Take top 2 sources (based on priority)
+            df1 = successful_data[0][1]
+            df2 = successful_data[1][1]
+
+            df = reconcile_data(df1, df2)
             df["source_used"] = "reconciled"
 
-            logger.info(f"Reconciliation successful for: {symbol_id}")
+            logger.info(f"Reconciliation SUCCESS for {symbol_id}")
             return df
 
         except Exception as e:
-            logger.warning(f"Reconciliation skipped for {symbol_id}: {str(e)}")
+            logger.warning(f"Reconciliation FAILED for {symbol_id}: {str(e)}")
 
-    # CASE 2: Primary
-    try:
-        logger.info(f"Trying primary source ({primary}) for: {symbol_id}")
+    # CASE 2: Fallback to best available (first success)
+    best_source, best_df = successful_data[0]
 
-        symbol = coverage[primary]
-        df = adapters[primary].fetch_ohlc(symbol)
+    logger.info(f"Using best available source: {best_source} for {symbol_id}")
 
-        df["source_used"] = primary
-        df = enrich_dataframe(df, symbol_id, primary)
-
-        return df
-
-    except Exception as e:
-        logger.exception(f"Primary source failed: {primary} | {symbol_id} | Error: {str(e)}")
-
-    # Fallback
-    if fallback:
-        try:
-            logger.info(f"Trying fallback source ({fallback}) for: {symbol_id}")
-
-            symbol = coverage[fallback]
-            df = adapters[fallback].fetch_ohlc(symbol)
-
-            df["source_used"] = fallback
-            df = enrich_dataframe(df, symbol_id, fallback)
-
-            return df
-        except Exception as e:
-            logger.exception(f"Fallback failed: {fallback} | {symbol_id} | Error: {str(e)}")
-
-    logger.critical(f"All sources failed for: {symbol_id}")
-    raise HTTPException(status_code=500, detail="No data available from any source")
-def select_sources(symbol_id: str, coverage: dict):
-
-    source_scores = {
-        "yfinance": 90,        # fast + free
-        "alpha_vantage": 70    # slower + rate-limited
-    }
-
-    available = {
-        k: v for k, v in coverage.items()
-        if k in source_scores and v is not None
-    }
-
-    if not available:
-        raise HTTPException(400, "No sources available")
-
-    # Sort by score
-    sorted_sources = sorted(
-        available.keys(),
-        key=lambda x: source_scores[x],
-        reverse=True
-    )
-
-    primary = sorted_sources[0]
-    fallback = sorted_sources[1] if len(sorted_sources) > 1 else None
-
-    logger.info(f"[SMART SELECTOR] {symbol_id} → {primary}, {fallback}")
-
-    return primary, fallback
+    return best_df
 
 def flatten_columns(df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -237,8 +199,6 @@ def sanitize_dataframe(df):
 import numpy as np
 import pandas as pd
 
-import numpy as np
-import pandas as pd
 
 def make_json_safe(df, symbol_id):
     logger.info(f"Final JSON sanitization for: {symbol_id}")
@@ -253,6 +213,10 @@ def make_json_safe(df, symbol_id):
     fill_cols = ["open", "high", "low", "close", "adj_close", "volume"]
     df[fill_cols] = df[fill_cols].ffill().bfill()
 
+     # Convert timestamps
+    if "timestamp" in df.columns:
+        df["timestamp"] = df["timestamp"].astype(str)
+
     # 🔹 Handle derived columns
     if "log_return" in df.columns:
         df["log_return"] = df["log_return"].replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -265,6 +229,39 @@ def make_json_safe(df, symbol_id):
 
     return df
 
+
+
+"""Basic connection example.
+"""
+
+import redis
+
+r = redis.Redis(
+    host='redis-18652.c267.us-east-1-4.ec2.cloud.redislabs.com',
+    port=18652,
+    decode_responses=True,
+    username="default",
+    password="kZqrqVP7sC7YkkIgiNPtAs8M3NK5Gf0r",
+)
+
+
+def json_serializer(obj):
+    import pandas as pd
+    import numpy as np
+
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+
+    if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+        return None
+
+    if pd.isna(obj):
+        return None
+
+    raise TypeError(f"Type {type(obj)} not serializable")
+
+
+
 @router.get("/fetch/{symbol_id}")
 def fetch_data(symbol_id: str):
 
@@ -273,10 +270,84 @@ def fetch_data(symbol_id: str):
     df = fetch_market_data(symbol_id)
 
     df = normalize(df, symbol_id)
+    if "symbol_id" not in df.columns:
+      df["symbol_id"] = symbol_id
     df = compute_returns(df)
     df = compute_volatility(df)
     df = validate(df)
     df = make_json_safe(df, symbol_id)
+    store_market_data_with_versioning(df)
+
+    latest = df.tail(10).to_dict(orient="records")
+    
+
+    r.set(
+        f"market:{symbol_id}",
+        json.dumps(latest, default=json_serializer)
+    )
+
+    for record in latest:
+       r.publish("market_updates", json.dumps(record, default=json_serializer))
+
+    logger.info(f"Published latest market data for {symbol_id}")
 
     logger.info(f"Returning response for: {symbol_id}")
+    
     return df.tail(5).to_dict(orient="records")
+
+
+
+@router.post("/check/batch")
+def check_batch(payload: dict):
+
+    adapter_map = {
+    "alpha_vantage": AlphaVantageAdapter(),
+    "massive": MassiveAdapter(),
+    "yfinance": YFinanceAdapter()
+}
+
+    results = {}
+
+    for source, symbols in payload.items():
+        adapter = adapter_map[source]
+
+        results[source] = {}
+
+        for symbol in symbols:
+            try:
+                results[source][symbol] = adapter.check_symbol(symbol)
+            except:
+                results[source][symbol] = False
+
+    return results
+@router.get("/check/{source}/{symbol}")
+def check_symbol(source: str, symbol: str):
+
+    adapter_map = {
+        "alpha_vantage": AlphaVantageAdapter(),
+        "massive": MassiveAdapter(),
+        "yfinance": YFinanceAdapter()
+    }
+
+    if source not in adapter_map:
+        raise HTTPException(status_code=400, detail="Invalid source")
+
+    try:
+        adapter = adapter_map[source]
+
+        # 🔹 Use lightweight check (IMPORTANT)
+        is_available = adapter.check_symbol(symbol)
+
+        return {
+            "source": source,
+            "symbol": symbol,
+            "available": is_available
+        }
+
+    except Exception as e:
+        return {
+            "source": source,
+            "symbol": symbol,
+            "available": False,
+            "error": str(e)
+        }
